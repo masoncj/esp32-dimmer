@@ -67,13 +67,13 @@ esp_err_t event_handler(void *ctx, system_event_t *event) {
     return ESP_OK;
 }
 
-
+/** Fade start task and queue are used to ensure serialized access to ring buffer.  External tasks push fade
+    request records onto fade_start_queue and fade_start_task then places them into buffer. */
 xQueueHandle fade_start_queue;
 void fade_start_task(void* arg){
     printf("Fade start task started.\n");
     while(1) {
         fade_t fade;
-        // Await notification from zero crossing interrupt.
         if (xQueueReceive(fade_start_queue, &fade, portMAX_DELAY)) {
             if (end_fade_index - start_fade_index > NUM_FADE_RECORDS) {
                 printf("Dropping fade at %i.\n", cycle_counter);
@@ -94,7 +94,13 @@ void fade_start_task(void* arg){
     }
 }
 
-
+/** Enqueue a request to fade the given channel over given time period to given final brightness.
+ *
+ * @param channel Integer channel number (0 - MAX_CHANNELS-1)
+ * @param duration_msecs Duration of fade in milliseconds.
+ * @param end_brightness ending brightness (from 0 to 1 DUTY_BIT_DEPTH -1).  Starting brightness is determined
+ * @return pdPASS if successful, or error from queuing.
+ */
 BaseType_t set_channel_fade(uint32_t channel, uint32_t duration_msecs, uint16_t end_brightness) {
     if (duration_msecs == 0) {
         return 0;
@@ -147,17 +153,17 @@ BaseType_t set_channel_fade(uint32_t channel, uint32_t duration_msecs, uint16_t 
     return ret;
 }
 
-
+/** Fade end queue and task receive notification when a given fade has completed.
+ * Currently, for testing, we simply enqueue another request to fade to max or min brightness.
+ */
 xQueueHandle fade_end_queue;
 void fade_end_task(void* arg){
     printf("Fade end task started.\n");
     while(1) {
         fade_t fade;
-        // Await notification from zero crossing interrupt.
         if(xQueueReceive(fade_end_queue, &fade, portMAX_DELAY)) {
 
             uint16_t brightness = fade.end_brightness > fade.start_brightness ? 0 : (1 << DUTY_BIT_DEPTH) - 1;
-
             for (uint16_t channel = 0; channel < NUM_CHANNELS; ++channel) {
                 if (fade.channels & (1 << channel)) {
                     set_channel_fade(channel, TESTING_FADE_DURATION_MSECS, brightness);
@@ -168,7 +174,7 @@ void fade_end_task(void* arg){
     }
 }
 
-
+/** Debugging task that reports current cycle counter. */
 void timer_report_task(void* arg) {
     printf("Timer report task started, %i ticks per.\n", REPORT_DURATION_MS / TICK_PERIOD_MS);
     while(1) {
@@ -180,7 +186,10 @@ void timer_report_task(void* arg) {
     }
 }
 
-
+/** Apply any active fade requests to the LEDC hardware.
+ *
+ * @param current_cycle The current cycle counter.
+ */
 void set_up_fades(uint32_t current_cycle) {
     // Apply any active fades.
     for (uint32_t fade_index = start_fade_index; fade_index != end_fade_index; ++fade_index) {
@@ -243,6 +252,7 @@ void IRAM_ATTR zero_crossing_interrupt(void* arg) {
     }
     GPIO.status_w1tc = intr_st;
 }
+
 
 void app_main(void) {
      nvs_flash_init();
@@ -314,7 +324,7 @@ void app_main(void) {
         NULL  // No need to store task handle.
     );
 
-
+    // Debugging task to report current cycle counter.
     xTaskCreate(
         timer_report_task,
         "Timer report task",  // Task name.
