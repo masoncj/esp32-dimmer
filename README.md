@@ -5,7 +5,11 @@ An attempt at a multi-channel incandescent light dimmer using the ESP32.  Will p
 
 ### Status
 
-Still under construction.  Experiments with the LEDC peripheral have revealed a need to perform dimming manually (instead of with LEDC [fade functionality](http://esp-idf.readthedocs.io/en/latest/api/ledc.html#_CPPv213ledc_set_fade11ledc_mode_t14ledc_channel_t8uint32_t21ledc_duty_direction_t8uint32_t8uint32_t8uint32_t)) due to inability to adjust PWM phase via dimming.  We're working on using the zero crossing interrupt to perform dimming instead.
+Still under construction.  Able to do basic fades of a single dimmer channel.
+
+Experiments with the LEDC peripheral revealed a need to perform dimming manually (instead of with LEDC [fade functionality](http://esp-idf.readthedocs.io/en/latest/api/ledc.html#_CPPv213ledc_set_fade11ledc_mode_t14ledc_channel_t8uint32_t21ledc_duty_direction_t8uint32_t8uint32_t8uint32_t)) due to inability to adjust PWM phase via dimming.  So, we implemented the dimming logic inside zero-crossing interrupt routine, but needed to perform all math as fixed-point due to hard faults when doing floating point in ISR.
+
+Next steps are to test multiple channels of dimming simultaneously (hoping for up to 8 channels) and to implement HTML/wifi based control.
 
 
 ### Hardware

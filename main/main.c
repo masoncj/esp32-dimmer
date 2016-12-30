@@ -1,6 +1,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/portmacro.h"
+#include "freertos/xtensa_api.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "esp_event.h"
@@ -10,126 +12,237 @@
 #include "driver/ledc.h"
 #include <math.h>
 #include <stdio.h>
+#include <soc/ledc_struct.h>
+#include <sys/time.h>
 
+#define TICK_RATE_HZ 100
+#define TICK_PERIOD_MS (1000 / TICK_RATE_HZ)
 #define HZ 60
+#define TESTING_FADE_DURATION_MSECS 15000
+#define REPORT_DURATION_MS 10000
 #define DUTY_BIT_DEPTH 10
-#define FADE_DURATION_SECS 4
-#define FADE_CYCLES_BIT_DEPTH 10
+#define FIXED_POINT_MULTIPLIER 8
+
+// TRIAC is kept high for TRIAC_GATE_IMPULSE_CYCLES PWM counts before setting low.
+#define TRIAC_GATE_IMPULSE_CYCLES 10
+
+// TRIAC is always set low at least TRIAC_GATE_QUIESCE_CYCLES PWM counts before the next zero crossing.
+#define TRIAC_GATE_QUIESCE_CYCLES 10
+
 
 #define LED_PIN GPIO_NUM_5
 #define ZERO_CROSSING_PIN GPIO_NUM_4
 
+// NUM_FADE_RECORDS Must be power of 2.
+#define NUM_FADE_RECORDS 32
 #define NUM_CHANNELS 1
 uint8_t channel_pins[NUM_CHANNELS] = { GPIO_NUM_16 };
 
-bool channel_dir[NUM_CHANNELS] = { 0 };
+volatile static uint32_t cycle_counter = 0;
 
+// Fade record: each record represents a dimming interval for one or more channels.
+typedef struct {
+    uint16_t channels;  // Bitmask of channels to fade.
+    uint16_t start_brightness;  // 0 to 1 << DUTY_BIT_DEPTH - 1.
+    uint16_t end_brightness;  // 0 to 1 << DUTY_BIT_DEPTH - 1.
+    uint32_t start_cycle_num;  // Value of cycle_counter when fade starts/started.
+    uint32_t end_cycle_num;  // Value of cycle_counter when fade ends/ended.
+} fade_t;
+
+// Circular buffer of fade record:
+volatile static fade_t fades[NUM_FADE_RECORDS];
+// See https://www.snellman.net/blog/archive/2016-12-13-ring-buffers/ for explanation of ring buffer mechanics.
+volatile static uint32_t start_fade_index = 0;
+volatile static uint32_t end_fade_index = 0;
 
 #define str(x) #x
 #define xstr(x) str(x)
 #define SHOW(x) printf("%s %i\n", xstr(x), x);
 
-xQueueHandle fade_end_queue;
+#define MIN(x, y) ((x > y) ? y : x);
+#define MAX(x, y) ((x > y) ? x : y);
+
 
 esp_err_t event_handler(void *ctx, system_event_t *event) {
     return ESP_OK;
 }
 
-void set_channel_fade(uint32_t channel, bool dir) {
-    uint32_t starting_duty;
-    if (dir) {  // Increasing.
-        starting_duty = 0;
-    } else {  // Decreasing.
-        starting_duty = (1 << (DUTY_BIT_DEPTH)) - 1;
-    }
-    uint32_t fade_duration_cycles = HZ * FADE_DURATION_SECS * 2;  // 2 half cycles per 60 hz cycle.
-    uint32_t fade_steps = 1;
-    if (fade_duration_cycles >= (1 << FADE_CYCLES_BIT_DEPTH)) {
-        // If it would require more PWM cycles to fade than is available in the counter,
-        // then we increase the number of cycles each step takes.
-        fade_steps = ceil((float)fade_duration_cycles / (float)(1 << FADE_CYCLES_BIT_DEPTH));
-        fade_duration_cycles = fade_duration_cycles / fade_steps;
-    }
-    if (fade_duration_cycles > 200) {
-        fade_duration_cycles -= 200;
-    }
-    
-    esp_err_t ledc_res = ledc_set_fade(
-        LEDC_HIGH_SPEED_MODE,
-        channel,
-        starting_duty,  // duty - Starting duty cycle (either 0 if increasing or max if decreasing,
-        dir, // gradule_direction - Direction of fade (true is increasing).
-        (uint32_t)fade_duration_cycles,  // step_num - Number of PWM cycles that fading occurs over.
-        fade_steps,  // duty_cyle_num - Number of cycles per step.
-        1  // duty_scale - Scale for number of cycles??
-    );
-    ESP_ERROR_CHECK( ledc_res );
-    LEDC.channel_group[0].channel[channel].hpoint.hpoint = 200;
-    
-    ESP_ERROR_CHECK( ledc_update_duty(
-        LEDC_HIGH_SPEED_MODE,
-        channel
-    ) );
-    
-    printf("set channel %i fade direction %i\n", channel, dir);
-}
 
-
-void IRAM_ATTR zero_crossing_interrupt(void* arg) {
-    // ISR triggered by GPIO edge at the end of each Alternating Current half-cycle.
-    // Used to reset the PWM timer and synchronize the MOSFET operation with
-    // the mains frequency.
-    
-    uint32_t intr_st = GPIO.status;
-    if (intr_st & (1 << ZERO_CROSSING_PIN)) {
-        // Delay very slightly to avoid bounce on negative edge.
-        for (int i = 0; i < 50; ++i) {}
-        if (GPIO.in & (1 << ZERO_CROSSING_PIN)) {
-            LEDC.timer_group[0].timer[0].conf.rst = 1;
-            LEDC.timer_group[0].timer[0].conf.rst = 0;
-            for (int i = 0; i < 50; ++i) {}
+xQueueHandle fade_start_queue;
+void fade_start_task(void* arg){
+    printf("Fade start task started.\n");
+    while(1) {
+        fade_t fade;
+        // Await notification from zero crossing interrupt.
+        if (xQueueReceive(fade_start_queue, &fade, portMAX_DELAY)) {
+            if (end_fade_index - start_fade_index > NUM_FADE_RECORDS) {
+                printf("Dropping fade at %i.\n", cycle_counter);
+                continue;
+            }
+            fades[end_fade_index & (NUM_FADE_RECORDS - 1)] = (volatile fade_t) fade;
+            end_fade_index += 1;
+            printf(
+                "At %i, enqueued fade from time %i, brightness %i to time %i, brightness %i. %i active fades.\n",
+                cycle_counter,
+                fade.start_cycle_num,
+                fade.start_brightness,
+                fade.end_cycle_num,
+                fade.end_brightness,
+                end_fade_index - start_fade_index
+            );
         }
     }
-    GPIO.status_w1tc = intr_st;
 }
 
 
-void IRAM_ATTR fade_end_task(void* arg) {
-    printf("Fade end task started.");
+BaseType_t set_channel_fade(uint32_t channel, uint32_t duration_msecs, uint16_t end_brightness) {
+    if (duration_msecs == 0) {
+        return 0;
+    }
+    end_brightness = MIN(end_brightness, (1 << DUTY_BIT_DEPTH) - 1);
+
+    // Look for currently running fades to derive initial brightness and start time.
+    uint16_t start_brightness;
+    uint32_t start_cycle = cycle_counter;
+    bool found = false;
+    for(uint32_t fade_index = start_fade_index; fade_index < end_fade_index; ++fade_index) {
+        fade_t fade = (fade_t) fades[fade_index & (NUM_FADE_RECORDS - 1)];
+        if ((fade.channels & (1 << channel)) && fade.end_cycle_num > start_cycle) {
+            start_brightness = fade.end_brightness;
+            start_cycle = fade.end_cycle_num;
+            found = true;
+        }
+    }
+    if (!found) {
+        // Not currently fading.
+        start_brightness = ((1 << DUTY_BIT_DEPTH) - 1) - LEDC.channel_group[0].channel[channel].hpoint.hpoint;
+    }
+
+    fade_t fade;
+    fade.channels = 1 << channel;
+    fade.start_brightness = start_brightness;
+    fade.end_brightness = end_brightness;
+    fade.start_cycle_num = cycle_counter;
+    fade.end_cycle_num = (uint32_t)(fade.start_cycle_num + (duration_msecs / 1000 * HZ * 2));
+    // Enqueue a task to put the fade on the ring buffer.
+    BaseType_t ret = xQueueSend(
+        fade_start_queue,
+        &fade,
+        0  // Don't block.
+    );
+
+    if (ret == pdPASS) {
+        printf(
+            "At %i, setting channel %i to fade from time %i, brightness %i to time %i, brightness %i.\n",
+            cycle_counter,
+            channel,
+            fade.start_cycle_num,
+            fade.start_brightness,
+            fade.end_cycle_num,
+            fade.end_brightness
+        );
+    } else {
+        printf("At %i, failed to set channel fade: %i\n", cycle_counter, ret);
+    }
+    return ret;
+}
+
+
+xQueueHandle fade_end_queue;
+void fade_end_task(void* arg){
+    printf("Fade end task started.\n");
     while(1) {
-        uint32_t intr_st;
-        // Await notification from fade end interrupt.
-        xQueueReceive(fade_end_queue, &intr_st, portMAX_DELAY);    
-        for (int i = 0; i < NUM_CHANNELS; ++i) {
-            if (intr_st & 1 << (LEDC_DUTY_CHNG_END_HSCH0_INT_ST_S + i)) {    
-                set_channel_fade(i, channel_dir[i]);
-                channel_dir[i] = !channel_dir[i];
+        fade_t fade;
+        // Await notification from zero crossing interrupt.
+        if(xQueueReceive(fade_end_queue, &fade, portMAX_DELAY)) {
+
+            uint16_t brightness = fade.end_brightness > fade.start_brightness ? 0 : (1 << DUTY_BIT_DEPTH) - 1;
+
+            for (uint16_t channel = 0; channel < NUM_CHANNELS; ++channel) {
+                if (fade.channels & (1 << channel)) {
+                    set_channel_fade(channel, TESTING_FADE_DURATION_MSECS, brightness);
+                    printf("Reset fade for channel %i to %i.\n", channel, brightness);
+                }
             }
         }
     }
 }
 
 
-void IRAM_ATTR fade_end_interrupt(void* arg) {
-    
-    GPIO.out_w1ts = 1 << LED_PIN;   
-
-    // Look at which channels triggered the interrupt,
-    uint32_t intr_st = LEDC.int_st.val; 
-    
-    // and enqueue a task to reset the fade.
-    xQueueSendFromISR(
-        fade_end_queue,
-        &intr_st,
-        NULL  // ESP examples don't seem to care about xHigherPriorityTaskWoken.
-    );
-
-    // Clear interrupts.
-    LEDC.int_clr.val = intr_st;
-    
-    GPIO.out_w1tc = 1 << LED_PIN;  
+void timer_report_task(void* arg) {
+    printf("Timer report task started, %i ticks per.\n", REPORT_DURATION_MS / TICK_PERIOD_MS);
+    while(1) {
+        vTaskDelay( REPORT_DURATION_MS / TICK_PERIOD_MS);
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        printf("At time %li.%li, cycle count %i with %i active fades.\n",
+               tv.tv_sec, tv.tv_usec, cycle_counter, end_fade_index - start_fade_index);
+    }
 }
 
+
+void set_up_fades(uint32_t current_cycle) {
+    // Apply any active fades.
+    for (uint32_t fade_index = start_fade_index; fade_index != end_fade_index; ++fade_index) {
+        fade_t fade = fades[fade_index & (NUM_FADE_RECORDS - 1)];
+        if (fade.end_cycle_num >= current_cycle && fade.start_cycle_num <= current_cycle) {
+            int32_t duration = fade.end_cycle_num - fade.start_cycle_num;
+            int32_t time_left = fade.end_cycle_num - current_cycle;
+            int32_t brightness = ((int32_t)fade.end_brightness) - ((int32_t)fade.start_brightness);
+            int32_t hpoint_scale = brightness * time_left / duration;
+            // TODO: do we need to scale here to account for non-linear brightness response?
+            uint32_t hpoint = (uint32_t) (((int32_t)fade.start_brightness) + hpoint_scale);
+            hpoint = MIN((1 << DUTY_BIT_DEPTH) - 1, hpoint);
+
+            // Don't get too close to the zero crossing or the TRIAC will turn immediately off at highest
+            // brightness.
+            hpoint = MAX(TRIAC_GATE_IMPULSE_CYCLES, hpoint);
+            uint32_t duty = TRIAC_GATE_IMPULSE_CYCLES;
+
+            for (uint16_t channel = 0; channel < NUM_CHANNELS; ++channel) {
+                if (fade.channels & (1 << channel)) {
+                    LEDC.channel_group[0].channel[channel].hpoint.hpoint = hpoint;
+                    LEDC.channel_group[0].channel[channel].duty.duty = duty << 4;
+                    LEDC.channel_group[0].channel[channel].conf1.duty_start = 1;
+                }
+            }
+        }
+        if (fade.end_cycle_num == current_cycle) {
+            xQueueSendFromISR(fade_end_queue, &fade, NULL);
+        }
+    }
+    // Check if head of buffer is a completed fade.
+    for (start_fade_index; start_fade_index != end_fade_index; ++start_fade_index) {
+        volatile fade_t *start_fade = fades + (start_fade_index & (NUM_FADE_RECORDS - 1));
+        if (start_fade->end_cycle_num > current_cycle) break;
+    }
+}
+
+
+void IRAM_ATTR zero_crossing_interrupt(void* arg) {
+    // ISR triggered by GPIO edge at the end of each Alternating Current half-cycle.
+    // Used to reset the PWM timer, which synchronize the TRIAC operation with
+    // the mains frequency.  Also used to perform fading of PWM phase.
+
+    uint32_t intr_st = GPIO.status;
+    if (intr_st & (1 << ZERO_CROSSING_PIN)) {
+        // Delay very slightly and retest pin to avoid bounce on negative edge.
+        for (int i = 0; i < 50; ++i) {}
+        if (GPIO.in & (1 << ZERO_CROSSING_PIN)) {
+
+            GPIO.out_w1ts = 1 << LED_PIN;
+            // Zero the PWM timer at the zero crossing.
+            LEDC.timer_group[0].timer[0].conf.rst = 1;
+            LEDC.timer_group[0].timer[0].conf.rst = 0;
+
+            uint32_t current_cycle = (uint32_t)cycle_counter;
+            set_up_fades(current_cycle);
+            cycle_counter += 1;
+            GPIO.out_w1tc = 1 << LED_PIN;
+        }
+    }
+    GPIO.status_w1tc = intr_st;
+}
 
 void app_main(void) {
      nvs_flash_init();
@@ -145,7 +258,7 @@ void app_main(void) {
 //     wifi_config_t sta_config = {
 //         .sta = {
 //             .ssid = "mason",
-//             .password = "birdsareweird",
+//             .password = "PASSWORD",
 //             .bssid_set = false
 //         }
 //     };
@@ -172,6 +285,47 @@ void app_main(void) {
     ) );
     
     printf("\nConfigured Zero Crossing Interrupt.\n");
+
+    // Fade task and queue are used to serialize addition to the circular buffer of fade actions.
+    fade_start_queue = xQueueCreate(
+        16,
+        sizeof(fade_t)
+    );
+    xTaskCreate(
+        fade_start_task,
+        "Fade start task",  // Task name.
+        2048,   // Stack size.
+        NULL,  // No parameters.
+        10,  // Priority
+        NULL  // No need to store task handle.
+    );
+
+    // Fade end task and queue are used to notify about the end of fades.
+    fade_end_queue = xQueueCreate(
+        16,
+        sizeof(fade_t)
+    );
+    xTaskCreate(
+        fade_end_task,
+        "Fade end task",  // Task name.
+        2048,   // Stack size.
+        NULL,  // No parameters.
+        8,  // Priority
+        NULL  // No need to store task handle.
+    );
+
+
+    xTaskCreate(
+        timer_report_task,
+        "Timer report task",  // Task name.
+        2048,   // Stack size.
+        NULL,  // No parameters.
+        6,  // Priority
+        NULL  // No need to store task handle.
+    );
+
+    printf("\nConfigured Fade Tasks and Queues.\n");
+
     
     SET_PERI_REG_MASK(DPORT_PERIP_CLK_EN_REG, DPORT_LEDC_CLK_EN);
     CLEAR_PERI_REG_MASK(DPORT_PERIP_RST_EN_REG, DPORT_LEDC_RST);
@@ -193,83 +347,31 @@ void app_main(void) {
             .speed_mode = LEDC_HIGH_SPEED_MODE,
             .channel = i,
             .timer_sel = LEDC_TIMER_0,
-            .duty = 0,
-            .intr_type = LEDC_INTR_FADE_END,
+            .duty = (1 << DUTY_BIT_DEPTH) - 1,
+            .intr_type = LEDC_INTR_DISABLE,
         };
         ESP_ERROR_CHECK( ledc_channel_config(&led_config) );
+        LEDC.channel_group[0].channel[i].duty.duty = TRIAC_GATE_IMPULSE_CYCLES << 4;
+        // Initial brightness of 0, meaning turn TRIAC on at very end:
+        LEDC.channel_group[0].channel[i].hpoint.hpoint = (1 << DUTY_BIT_DEPTH) - 1;
+        LEDC.channel_group[0].channel[i].conf0.sig_out_en = 1;
+        LEDC.channel_group[0].channel[i].conf1.duty_start = 1;
     }
     
     printf("\nConfigured channels.\n");
-    
-    // Fade end queue and task are used to handle when LEDC channel finishes fading
-    // from one brightness to another.
-    fade_end_queue = xQueueCreate(
-        16,
-        sizeof(uint32_t)  // Holds a single uint32_t representing which LEDC channels have finished fading.
-    );
-    xTaskCreate(
-        fade_end_task,
-        "Fade end task",  // Task name.
-        2048,   // Stack size.
-        NULL,  // No parameters.
-        6,  // Priority
-        NULL  // No need to store task handle.
-    );
-    
-    LEDC.int_clr.val = (1<<17) -1 ;
 
-    ledc_isr_register(
-        fade_end_interrupt,
-        NULL,
-        ESP_INTR_FLAG_LEVEL2,
-        NULL
-    ); 
-    
-    printf("\nConfigured fade end interrupt.\n");
-    
-    for (int i = 0; i < NUM_CHANNELS; ++i) {
-        set_channel_fade(i, 1);
+
+
+    for (uint16_t i = 0; i < NUM_CHANNELS; ++i) {
+        set_channel_fade(i, TESTING_FADE_DURATION_MSECS, (1 << DUTY_BIT_DEPTH) - 1);
+        //vTaskDelay( TESTING_FADE_DURATION_MSECS / NUM_CHANNELS / TICK_PERIOD_MS);
     }
-    
+
     printf("\nSet channel fades.\n");
 
-//     SHOW(LEDC.channel_group[0].channel[0].conf0.timer_sel)
-//     SHOW(LEDC.channel_group[0].channel[0].conf0.sig_out_en)
-//     SHOW(LEDC.channel_group[0].channel[0].hpoint.hpoint)
-//     SHOW(LEDC.channel_group[0].channel[0].duty.duty)
-//     SHOW(LEDC.channel_group[0].channel[0].conf1.duty_scale)
-//     SHOW(LEDC.channel_group[0].channel[0].conf1.duty_cycle)
-//     SHOW(LEDC.channel_group[0].channel[0].conf1.duty_num)
-//     SHOW(LEDC.channel_group[0].channel[0].conf1.duty_inc)
-//     SHOW(LEDC.channel_group[0].channel[0].conf1.duty_start)
-//     SHOW(LEDC.channel_group[0].channel[0].duty_rd.duty_read)
-//     SHOW(LEDC.timer_group[0].timer[0].conf.bit_num)
-//     SHOW(LEDC.timer_group[0].timer[0].conf.div_num)
-//     SHOW(LEDC.timer_group[0].timer[0].conf.pause)
-//     SHOW(LEDC.timer_group[0].timer[0].conf.rst)
-//     SHOW(LEDC.timer_group[0].timer[0].conf.tick_sel)
-//     SHOW(LEDC.timer_group[0].timer[0].conf.low_speed_update)
-//     SHOW(LEDC.timer_group[0].timer[0].value.timer_cnt)
-//     for (int i = 0; i < 20; ++i) {
-//         SHOW(LEDC.timer_group[0].timer[0].value.timer_cnt)
-//     }
-    
     ESP_ERROR_CHECK( gpio_intr_enable(ZERO_CROSSING_PIN) );
-    printf("Enabled zero crossing interrupt.\n");
-    
-    SHOW(LEDC.channel_group[0].channel[0].conf1.duty_start)
-    SHOW(LEDC.timer_group[0].timer[0].value.timer_cnt)
-    SHOW(LEDC.timer_group[0].timer[0].value.timer_cnt)
-    SHOW(LEDC.timer_group[0].timer[0].conf.bit_num)
-    SHOW(LEDC.timer_group[0].timer[0].conf.div_num)
-    SHOW(LEDC.timer_group[0].timer[0].conf.pause)
-    SHOW(LEDC.timer_group[0].timer[0].conf.rst)
-    SHOW(LEDC.timer_group[0].timer[0].conf.tick_sel)
-    SHOW(LEDC.timer_group[0].timer[0].conf.low_speed_update)
-    SHOW(LEDC.timer_group[0].timer[0].value.timer_cnt)
-    
-    gpio_set_level(LED_PIN, 0);
-    
-    while(1) {}
-}
+    printf("\nEnabled zero crossing interrupt.\n");
 
+    gpio_set_level(LED_PIN, 0);
+
+}
