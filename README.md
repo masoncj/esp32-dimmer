@@ -1,15 +1,15 @@
 ## ESP32 Light Dimmer
 
 
-An attempt at a multi-channel incandescent light dimmer using the ESP32.  Will provide HTML/javascript based UI for dimming lights.
+An attempt at a multi-channel incandescent light dimmer using the ESP32.  Will eventually provide HTML/javascript based UI for dimming lights.
 
 ### Status
 
-Still under construction.  Able to do basic fades of a single dimmer channel.
+Still under construction.  Able to do fades of up to 4 dimmer channels.
 
 Experiments with the LEDC peripheral revealed a need to perform dimming manually (instead of with LEDC [fade functionality](http://esp-idf.readthedocs.io/en/latest/api/ledc.html#_CPPv213ledc_set_fade11ledc_mode_t14ledc_channel_t8uint32_t21ledc_duty_direction_t8uint32_t8uint32_t8uint32_t)) due to inability to adjust PWM phase via dimming.  So, we implemented the dimming logic inside zero-crossing interrupt routine, but needed to perform all math as fixed-point due to hard faults when doing floating point in ISR.
 
-Next steps are to test multiple channels of dimming simultaneously (hoping for up to 8 channels) and to implement HTML/wifi based control.
+Next step is to implement HTML/wifi based control.  Looking at possibly using 
 
 
 ### Hardware

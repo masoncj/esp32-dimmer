@@ -12,9 +12,11 @@ set(CMAKE_CXX_STANDARD 11)
 set(SOURCE_FILES
     main/main.c)
 
+include_directories ("build/include")
 include_directories ("${IDF_PATH}/components/freertos/include")
 include_directories ("${IDF_PATH}/components/driver/include")
 include_directories ("${IDF_PATH}/components/esp32/include")
 include_directories ("${IDF_PATH}/components/nvs_flash/include")
+include_directories ("${IDF_PATH}/components/log/include")
 
 add_executable(esp_dimmer ${SOURCE_FILES})
