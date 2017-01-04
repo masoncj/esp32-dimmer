@@ -1,0 +1,9 @@
+[submodule "components/duktape-esp32"]
+	path = components/duktape-esp32
+	url = https://github.com/nkolban/duktape-esp32.git
+[submodule "tools/Lua-RTOS-ESP32"]
+	path = tools/Lua-RTOS-ESP32
+	url = https://github.com/whitecatboard/Lua-RTOS-ESP32/
+[submodule "tools/libesphttpd"]
+	path = tools/libesphttpd
+	url = https://github.com/Spritetm/libesphttpd/

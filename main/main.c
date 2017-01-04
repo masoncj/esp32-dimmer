@@ -16,6 +16,9 @@
 #include <soc/ledc_struct.h>
 #include <sys/time.h>
 
+#include "duktape_task.h"
+#include "duktape_event.h"
+
 // Timing configuration ///////////////////////////////////////////////////////////
 
 #define TICK_RATE_HZ 100
@@ -287,31 +290,18 @@ void IRAM_ATTR zero_crossing_interrupt(void* arg) {
 
 
 void app_main(void) {
-     nvs_flash_init();
+    nvs_flash_init();
 
     esp_log_level_set(LOG_FADE, ESP_LOG_WARN);
     esp_log_level_set(LOG_CYCLES, ESP_LOG_WARN);
 
-     ESP_LOGI(LOG_STARTUP, "\n\nIn main.\n");
+    ESP_LOGI(LOG_STARTUP, "\n\nIn main.\n");
      
-//     tcpip_adapter_init();
-//     ESP_ERROR_CHECK( esp_event_loop_init(event_handler, NULL) );
-//     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-//     ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
-//     ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
-//     ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
-//     wifi_config_t sta_config = {
-//         .sta = {
-//             .ssid = "mason",
-//             .password = "PASSWORD",
-//             .bssid_set = false
-//         }
-//     };
-//     ESP_ERROR_CHECK( esp_wifi_set_config(WIFI_IF_STA, &sta_config) );
-//     ESP_ERROR_CHECK( esp_wifi_start() );
-//     ESP_ERROR_CHECK( esp_wifi_connect() );
-//     
-//     ESP_LOGI(LOG_STARTUP, "Configured wifi.\n");
+    tcpip_adapter_init();
+    ESP_ERROR_CHECK(esp_event_loop_init(event_handler, NULL));
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     
     // Set LED to monitor setup:
     gpio_set_direction(LED_PIN, GPIO_MODE_OUTPUT);
@@ -416,5 +406,8 @@ void app_main(void) {
     ESP_LOGI(LOG_STARTUP, "Set channel fades.\n");
 
     gpio_set_level(LED_PIN, 0);
+
+    esp32_duktape_initEvents();
+    xTaskCreatePinnedToCore(&duktape_task, "duktape_task", 16*1024, NULL, 5, NULL, 0);
 
 }
