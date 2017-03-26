@@ -18,6 +18,10 @@
 
 #include "duktape_task.h"
 #include "duktape_event.h"
+#include "logging.h"
+#include "telnet.h"
+
+LOG_TAG("main");
 
 // Timing configuration ///////////////////////////////////////////////////////////
 
@@ -288,6 +292,34 @@ void IRAM_ATTR zero_crossing_interrupt(void* arg) {
     GPIO.status_w1tc = intr_st;
 }
 
+static void recvData(uint8_t *buffer, size_t size) {
+	LOGD("We received: %.*s", size, buffer);
+	// We have received a line of data from the telnet client, now we want
+	// to present it to Duktape for processing.  We do this by creating an event
+	// and placing it on the event processing queue.  The type of the event will be
+	// ESP32_DUKTAPE_EVENT_COMMAND_LINE which will contain the data and length.
+	// The data will eventually have to be released.
+
+	event_newCommandLineEvent((char *)buffer, size,
+	1); // 1 = frome keyboard
+} // recvData
+
+static void newTelnetPartner() {
+	duktape_init_environment();
+} // newTelnetPartner
+
+
+/**
+ * Process telnet commands on a separate task.
+ */
+
+static void telnetTask(void *data) {
+	LOGD(">> telnetTask");
+	telnet_esp32_listenForClients(recvData, newTelnetPartner);
+	LOGD("<< telnetTask");
+	vTaskDelete(NULL);
+} // newTelnetPartner
+
 
 void app_main(void) {
     nvs_flash_init();
@@ -366,37 +398,37 @@ void app_main(void) {
     CLEAR_PERI_REG_MASK(DPORT_PERIP_RST_EN_REG, DPORT_LEDC_RST);
     ESP_LOGI(LOG_STARTUP, "\nConfigured LED Controller.\n");
     
-    ledc_timer_config_t timer_config = {
-        .speed_mode = LEDC_HIGH_SPEED_MODE,
-        .timer_num = 0,
-        .bit_num = DUTY_BIT_DEPTH,
-        .freq_hz = HZ * 2,
-    };
-    ESP_ERROR_CHECK( ledc_timer_config(&timer_config) );
+//    ledc_timer_config_t timer_config = {
+//        .speed_mode = LEDC_HIGH_SPEED_MODE,
+//        .timer_num = 0,
+//        .bit_num = DUTY_BIT_DEPTH,
+//        .freq_hz = HZ * 2,
+//    };
+//    ESP_ERROR_CHECK( ledc_timer_config(&timer_config) );
     
     ESP_LOGI(LOG_STARTUP, "Configured timer.\n");
     
-    for (int i = 0; i < NUM_CHANNELS; ++i) {
-        ledc_channel_config_t led_config = {
-            .gpio_num = channel_pins[i], 
-            .speed_mode = LEDC_HIGH_SPEED_MODE,
-            .channel = i,
-            .timer_sel = LEDC_TIMER_0,
-            .duty = (1 << DUTY_BIT_DEPTH) - 1,
-            .intr_type = LEDC_INTR_DISABLE,
-        };
-        ESP_ERROR_CHECK( ledc_channel_config(&led_config) );
-        LEDC.channel_group[0].channel[i].duty.duty = TRIAC_GATE_IMPULSE_CYCLES << 4;
-        // Initial brightness of 0, meaning turn TRIAC on at very end:
-        LEDC.channel_group[0].channel[i].hpoint.hpoint = (1 << DUTY_BIT_DEPTH) - 1;
-        LEDC.channel_group[0].channel[i].conf0.sig_out_en = 1;
-        LEDC.channel_group[0].channel[i].conf1.duty_start = 1;
-    }
+//    for (int i = 0; i < NUM_CHANNELS; ++i) {
+//        ledc_channel_config_t led_config = {
+//            .gpio_num = channel_pins[i],
+//            .speed_mode = LEDC_HIGH_SPEED_MODE,
+//            .channel = i,
+//            .timer_sel = LEDC_TIMER_0,
+//            .duty = (1 << DUTY_BIT_DEPTH) - 1,
+//            .intr_type = LEDC_INTR_DISABLE,
+//        };
+//        ESP_ERROR_CHECK( ledc_channel_config(&led_config) );
+//        LEDC.channel_group[0].channel[i].duty.duty = TRIAC_GATE_IMPULSE_CYCLES << 4;
+//        // Initial brightness of 0, meaning turn TRIAC on at very end:
+//        LEDC.channel_group[0].channel[i].hpoint.hpoint = (1 << DUTY_BIT_DEPTH) - 1;
+//        LEDC.channel_group[0].channel[i].conf0.sig_out_en = 1;
+//        LEDC.channel_group[0].channel[i].conf1.duty_start = 1;
+//    }
     
     ESP_LOGI(LOG_STARTUP, "Configured channels.\n");
 
     ESP_ERROR_CHECK( gpio_intr_enable(ZERO_CROSSING_PIN) );
-    ESP_LOGI(LOG_STARTUP, "Enabled zero crossing interrupt.\n");
+    //ESP_LOGI(LOG_STARTUP, "Enabled zero crossing interrupt.\n");
 
     for (uint16_t i = 0; i < NUM_CHANNELS; ++i) {
         set_channel_fade(i, TESTING_FADE_DURATION_MSECS, (1 << DUTY_BIT_DEPTH) - 1);
@@ -406,8 +438,11 @@ void app_main(void) {
     ESP_LOGI(LOG_STARTUP, "Set channel fades.\n");
 
     gpio_set_level(LED_PIN, 0);
+    
+    xTaskCreatePinnedToCore(&telnetTask, "telnetTask", 8048, NULL, 5, NULL, 0);
+
 
     esp32_duktape_initEvents();
-    xTaskCreatePinnedToCore(&duktape_task, "duktape_task", 16*1024, NULL, 5, NULL, 0);
+    xTaskCreatePinnedToCore(&duktape_task, "duktape_task", 16*1024, NULL, 5, NULL, tskNO_AFFINITY);
 
 }

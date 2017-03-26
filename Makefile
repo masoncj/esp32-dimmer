@@ -34,7 +34,7 @@ duktape_configure: venv
 flash: flash-images
 
 flash-images: images
-	$(ESPTOOLPY_WRITE_FLASH) --compress 0x360000 build/espfs.img 0x180000 build/spiffs.img
+	$(ESPTOOLPY_WRITE_FLASH) --compress 0x300000 build/espfs.img 0x180000 build/spiffs.img
 
 clean: local-clean
 

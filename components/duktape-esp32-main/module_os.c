@@ -24,13 +24,41 @@
 
 #include <errno.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #include "duktape.h"
+#include "duktape_event.h"
+#include "duktape_utils.h"
 #include "module_os.h"
 #include "logging.h"
 
+extern int h_errno;
+
+//static uint32_t g_gpioISRHandlerStashKey = -1;
 
 LOG_TAG("module_os");
+
+/*
+static int gpio_isr_handler_dataProvider(duk_context *ctx, void *context) {
+	gpio_num_t pin = (gpio_num_t)context;
+	duk_push_int(ctx, pin);
+	return 1;
+}
+*/
+/*
+ * GPIO ISR handler
+ * This function will be called when a GPIO interrupt occurs.
+ */
+/*
+static void gpio_isr_handler(void *args) {
+	event_newCallbackRequestedEvent(
+		ESP32_DUKTAPE_CALLBACK_TYPE_ISR_FUNCTION,
+		g_gpioISRHandlerStashKey,
+		gpio_isr_handler_dataProvider,
+		args
+	);
+} // gpio_isr_handler
+*/
 
 /**
  * Accept an incoming client request.
@@ -215,7 +243,7 @@ static duk_ret_t js_os_connect(duk_context *ctx) {
 		return 0;
 	}
 	if (!duk_is_string(ctx, -1)) {
-		LOGE("js_os_connect: address property is not a sting.");
+		LOGE("js_os_connect: address property is not a string.");
 		return 0;
 	}
 
@@ -238,9 +266,52 @@ static duk_ret_t js_os_connect(duk_context *ctx) {
 	return 1;
 } // js_os_connect
 
+
 /*
  * Retrieve the hostname for the address or null if not resolvable.
  * [0] - hostname
+ *
+ *  * The return is the string representation of the IP address of the hostname.
+ */
+static duk_ret_t js_os_getaddrinfo(duk_context *ctx) {
+	struct addrinfo *result;
+	char retName[INET_ADDRSTRLEN];
+
+	LOGD(">> js_os_getaddrinfo");
+
+	const char *hostname = duk_get_string(ctx, -1);
+	LOGD(" - Looking up %s", hostname);
+	strcpy(retName, "");
+
+	int rc = getaddrinfo(
+			hostname,
+			NULL, // Service identifier
+			NULL, // Hints
+			&result
+	);
+	if (rc != 0) {
+		LOGD(" - not found! rc = %d", rc);
+		duk_push_null(ctx);
+	} else {
+
+
+		inet_ntop(
+			AF_INET,
+			&((struct sockaddr_in *)(result->ai_addr))->sin_addr,
+			retName, sizeof(retName));
+		duk_push_string(ctx, retName);
+		freeaddrinfo(result);
+	}
+	LOGD("<< js_os_getaddrinfo: IP=%s", retName);
+	return 1;
+} // js_os_getaddrinfo
+
+
+/*
+ * Retrieve the hostname for the address or null if not resolvable.
+ * [0] - hostname
+ *
+ * The return is the string representation of the IP address of the hostname.
  */
 static duk_ret_t js_os_gethostbyname(duk_context *ctx) {
 	LOGD(">> js_os_gethostbyname");
@@ -264,11 +335,75 @@ static duk_ret_t js_os_gethostbyname(duk_context *ctx) {
  * GPIO Functions
  */
 #if defined(ESP_PLATFORM)
+
+/*
+ * Get the GPIO level of the pin.
+ * [0] - Pin number
+ */
+/*
+static duk_ret_t js_os_gpioGetLevel(duk_context *ctx) {
+	gpio_num_t pinNum = duk_get_int(ctx, -1);
+	int level = gpio_get_level(pinNum);
+	if (level == 0) {
+		duk_push_false(ctx);
+	} else {
+		duk_push_true(ctx);
+	}
+	return 1;
+} // js_os_gpioGetLevel
+*/
+
+/*
+ * Initialize the GPIO pin.
+ * [0] - Pin number
+ */
+/*
+static duk_ret_t js_os_gpioInit(duk_context *ctx) {
+	gpio_num_t pinNum = duk_get_int(ctx, -2);
+	gpio_pad_select_gpio(pinNum);
+	return 0;
+} // js_os_gpioInit
+*/
+
+/*
+ * [0] - Int - flags
+ * [1] - function - handler function
+ */
+/*
+static duk_ret_t js_os_gpioInstallISRService(duk_context *ctx) {
+	int flags = duk_get_int(ctx, -2);
+	if (!duk_is_function(ctx, -1)) {
+		LOGD("js_os_gpioInstallISRService: not a function!");
+		return 0;
+	}
+
+	esp_err_t errRc = gpio_install_isr_service(flags);
+	if (errRc != ESP_OK) {
+		LOGE("gpio_install_isr_service: %s", esp32_errToString(errRc));
+	}
+
+	g_gpioISRHandlerStashKey = esp32_duktape_stash_array(ctx, 1);
+	return 0;
+} // js_os_gpioInstallISRService
+
+
+// [0] - pin
+static duk_ret_t js_os_gpioISRHandlerAdd(duk_context *ctx) {
+	int pin = duk_get_int(ctx, -1);
+	esp_err_t errRc = gpio_isr_handler_add(pin, gpio_isr_handler, (void *)pin);
+	if (errRc != ESP_OK) {
+		LOGE("gpio_isr_handler_add: %s", esp32_errToString(errRc));
+	}
+	return 0;
+} // js_os_gpioISRHandlerAdd
+*/
+
 /*
  * Set the GPIO direction of the pin.
  * [0] - Pin number
  * [1] - Direction - 0=Input, 1=output
  */
+/*
 static duk_ret_t js_os_gpioSetDirection(duk_context *ctx) {
 	gpio_mode_t mode;
 	gpio_num_t pinNum = duk_get_int(ctx, -2);
@@ -286,23 +421,41 @@ static duk_ret_t js_os_gpioSetDirection(duk_context *ctx) {
 	return 0;
 } // js_os_gpioSetDirection
 
-
+*/
 /*
- * Initialize the GPIO pin.
- * [0] - Pin number
+ * Set the interrupt type that the pin will respond to.
+ * [0] - pin
+ * [1] - Interrupt type - Choices are:
+ *  - GPIO_INTR_ANYEDGE
+ *  - GPIO_INTR_DISABLE
+ *  - GPIO_INTR_NEGEDGE
+ *  - GPIO_INTR_POSEDGE
  */
-static duk_ret_t js_os_gpioInit(duk_context *ctx) {
-	gpio_num_t pinNum = duk_get_int(ctx, -2);
-	gpio_pad_select_gpio(pinNum);
-	return 0;
-} // js_os_gpioInit
+/*
+static duk_ret_t js_os_gpioSetIntrType(duk_context *ctx) {
+	gpio_num_t pin = (gpio_num_t)duk_get_int(ctx, -2);
+	gpio_int_type_t type = (gpio_int_type_t)duk_get_int(ctx, -1);
 
+	// Validate that type is a valid type.
+	if (type < 0 || type >= GPIO_INTR_MAX) {
+		LOGE("js_os_gpioSetIntrType: Invalid interrupt type: %d", type);
+		return 0;
+	}
+
+	esp_err_t errRc = gpio_set_intr_type(pin, type);
+	if (errRc != 0) {
+		LOGE("gpio_set_intr_type: %s", esp32_errToString(errRc));
+	}
+	return 0;
+} // js_os_gpioSetIntrType
+*/
 
 /*
  * Set the GPIO level of the pin.
  * [0] - Pin number
  * [1] - level - true or false
  */
+/*
 static duk_ret_t js_os_gpioSetLevel(duk_context *ctx) {
 	uint32_t level;
 	gpio_num_t pinNum = duk_get_int(ctx, -2);
@@ -312,31 +465,34 @@ static duk_ret_t js_os_gpioSetLevel(duk_context *ctx) {
 	} else {
 		level = 1;
 	}
-	esp_err_t rc = gpio_set_level(pinNum, level);
-	if (rc != 0) {
-		LOGE("gpio_set_level: %s", esp32_errToString(rc));
+	esp_err_t errRc = gpio_set_level(pinNum, level);
+	if (errRc != 0) {
+		LOGE("gpio_set_level: %s", esp32_errToString(errRc));
 	}
 	return 0;
 } // js_os_gpioSetLevel
 
-
-
-
-
+*/
 /*
- * Get the GPIO level of the pin.
+ * Set the GPIO level of the pin.
  * [0] - Pin number
+ * [1] - mode - pull mode.  One of:
+ *  - GPIO_PULLUP_ONLY
+ *  - GPIO_PULLDOWN_ONLY
+ *  - GPIO_PULLUP_PULLDOWN
+ *  - GPIO_FLOATING
  */
-static duk_ret_t js_os_gpioGetLevel(duk_context *ctx) {
-	gpio_num_t pinNum = duk_get_int(ctx, -1);
-	int level = gpio_get_level(pinNum);
-	if (level == 0) {
-		duk_push_false(ctx);
-	} else {
-		duk_push_true(ctx);
+/*
+static duk_ret_t js_os_gpioSetPullMode(duk_context *ctx) {
+	gpio_num_t pinNum = duk_get_int(ctx, -2);
+	gpio_pull_mode_t pullMode = duk_get_int(ctx, -1);
+	esp_err_t errRc = gpio_set_pull_mode(pinNum, pullMode);
+	if (errRc != ESP_OK) {
+		LOGE("gpio_set_pull_mode: %s", esp32_errToString(errRc));
 	}
-	return 1;
-} // js_os_gpioGetLevel
+	return 0;
+} // js_os_gpioSetPullMode
+*/
 #endif // ESP_PLATFORM
 
 
@@ -719,6 +875,38 @@ static duk_ret_t js_os_sha1(duk_context *ctx) {
 
 
 /**
+ * Shutdown the socket.
+ * [0] - Params object
+ * - sockfd: The socket to shutdown.
+ *
+ * There is no return code.
+ */
+static duk_ret_t js_os_shutdown(duk_context *ctx) {
+	LOGD(">> js_os_shutdown");
+
+	if (!duk_is_object(ctx, -1)) {
+		LOGE("js_os_shutdown: No parameters object found.");
+		return 0;
+	}
+	if (!duk_get_prop_string(ctx, -1, "sockfd")) {
+		LOGE("js_os_shutdown: No sockfd property found.");
+		return 0;
+	}
+	int sockfd = duk_get_int(ctx, -1);
+	duk_pop(ctx);
+
+	LOGD("About to shutdown fd=%d", sockfd);
+	int rc = shutdown(sockfd, SHUT_RDWR);
+	if (rc < 0) {
+		LOGE("Error with shutdown: %d: %d - %s", rc, errno, strerror(errno));
+	}
+
+	LOGD("<< js_os_shutdown");
+	return 0;
+} // js_os_shutdown
+
+
+/**
  * Create a new socket.
  * The is no input to this function.
  *
@@ -743,7 +931,6 @@ static duk_ret_t js_os_socket(duk_context *ctx) {
 } // js_os_socket
 
 
-
 /**
  * Create the OS module in Global.
  */
@@ -752,157 +939,49 @@ void ModuleOS(duk_context *ctx) {
 	duk_push_global_object(ctx);
 	// [0] - Global object
 
-	duk_idx_t idx = duk_push_object(ctx); // Create new OS object
+  duk_push_object(ctx); // Create new OS object
 	// [0] - Global object
 	// [1] - New object - OS object
 
-	duk_push_c_function(ctx, js_os_accept, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_accept
+	ADD_FUNCTION("accept",        js_os_accept,        1);
+	ADD_FUNCTION("bind",          js_os_bind,          1);
+	ADD_FUNCTION("close",         js_os_close,         1);
+	ADD_FUNCTION("closesocket",   js_os_closesocket,   1);
+	ADD_FUNCTION("connect",       js_os_connect,       1);
+	ADD_FUNCTION("getaddrinfo",   js_os_getaddrinfo,   1);
+	ADD_FUNCTION("gethostbyname", js_os_gethostbyname, 1);
 
-	duk_put_prop_string(ctx, idx, "accept"); // Add accept to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_bind, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_bind
-
-	duk_put_prop_string(ctx, idx, "bind"); // Add bind to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_close, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_close
-
-	duk_put_prop_string(ctx, idx, "close"); // Add close to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_closesocket, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_closesocket
-
-	duk_put_prop_string(ctx, idx, "closesocket"); // Add closesocket to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_connect, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_connect
-
-	duk_put_prop_string(ctx, idx, "connect"); // Add connect to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_gethostbyname, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_gethostbyname
-
-	duk_put_prop_string(ctx, idx, "gethostbyname"); // Add gethostbyname to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-
+/*
 #if defined(ESP_PLATFORM)
-	duk_push_c_function(ctx, js_os_gpioGetLevel, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_gpioGetLevel
-
-	duk_put_prop_string(ctx, idx, "gpioGetLevel"); // Add gpioGetLevel to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_gpioInit, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_gpioInit
-
-	duk_put_prop_string(ctx, idx, "gpioInit"); // Add js_os_gpioInit to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_gpioSetDirection, 2);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_setDirection
-
-	duk_put_prop_string(ctx, idx, "gpioSetDirection"); // Add gpioSetDirection to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_gpioSetLevel, 2);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_gpioSetLevel
-
-	duk_put_prop_string(ctx, idx, "gpioSetLevel"); // Add gpioSetLevel to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
+	ADD_FUNCTION("gpioGetLevel",          js_os_gpioGetLevel,          1);
+	ADD_FUNCTION("gpioISRHandlerAdd",     js_os_gpioISRHandlerAdd,     1);
+	ADD_FUNCTION("gpioInit",              js_os_gpioInit,              1);
+	ADD_FUNCTION("gpioInstallISRService", js_os_gpioInstallISRService, 2);
+	ADD_FUNCTION("gpioSetDirection",      js_os_gpioSetDirection,      2);
+	ADD_FUNCTION("gpioSetIntrType",       js_os_gpioSetIntrType,       2);
+	ADD_FUNCTION("gpioSetLevel",          js_os_gpioSetLevel,          2);
+	ADD_FUNCTION("gpioSetPullMode",       js_os_gpioSetPullMode,       2);
 #endif // ESP_PLATFORM
+*/
 
-	duk_push_c_function(ctx, js_os_listen, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_listen
+	ADD_FUNCTION("listen",   js_os_listen,   1);
+	ADD_FUNCTION("recv",     js_os_recv,     1);
+	ADD_FUNCTION("select",   js_os_select,   1);
+	ADD_FUNCTION("send",     js_os_send,     1);
+	ADD_FUNCTION("sha1",     js_os_sha1,     1);
+	ADD_FUNCTION("shutdown", js_os_shutdown, 1);
+	ADD_FUNCTION("socket",   js_os_socket,   0);
 
-	duk_put_prop_string(ctx, idx, "listen"); // Add listen to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_recv, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_recv
-
-	duk_put_prop_string(ctx, idx, "recv"); // Add recv to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_select, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_select
-
-	duk_put_prop_string(ctx, idx, "select"); // Add select to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_send, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_send
-
-	duk_put_prop_string(ctx, idx, "send"); // Add send to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_sha1, 1);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_sha1
-
-	duk_put_prop_string(ctx, idx, "sha1"); // Add sha1 to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
-	duk_push_c_function(ctx, js_os_socket, 0);
-	// [0] - Global object
-	// [1] - New object - OS object
-	// [2] - C Function - js_os_socket
-
-	duk_put_prop_string(ctx, idx, "socket"); // Add socket to new OS
-	// [0] - Global object
-	// [1] - New object - OS object
-
+	/*
+	ADD_INT("INTR_ANYEDGE",    GPIO_INTR_ANYEDGE);
+	ADD_INT("INTR_DISABLE",    GPIO_INTR_DISABLE);
+	ADD_INT("INTR_NEGEDGE",    GPIO_INTR_NEGEDGE);
+	ADD_INT("INTR_POSEDGE",    GPIO_INTR_POSEDGE);
+	ADD_INT("PULLUP_ONLY",     GPIO_PULLUP_ONLY);
+	ADD_INT("PULLDOWN_ONLY",   GPIO_PULLDOWN_ONLY);
+	ADD_INT("PULLUP_PULLDOWN", GPIO_PULLUP_PULLDOWN);
+	ADD_INT("FLOATING",        GPIO_FLOATING);
+	*/
 
 	duk_put_prop_string(ctx, 0, "OS"); // Add OS to global
 	// [0] - Global object

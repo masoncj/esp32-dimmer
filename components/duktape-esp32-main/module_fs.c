@@ -201,6 +201,10 @@ static duk_ret_t js_fs_closeSync(duk_context *ctx) {
 } // js_fs_closeSync
 
 
+/*
+ * Determine details on an open file.
+ * [0] - fd
+ */
 static duk_ret_t js_fs_fstatSync(duk_context *ctx) {
 	struct stat statBuf;
 	int fd = duk_require_int(ctx, 0);
@@ -223,16 +227,19 @@ static duk_ret_t js_fs_fstatSync(duk_context *ctx) {
 static duk_ret_t js_fs_statSync(duk_context *ctx) {
 	struct stat statBuf;
 	const char *path = duk_require_string(ctx, 0);
+	LOGD(">> js_fs_statSync: %s", path);
 	int rc = stat(path, &statBuf);
 	if (rc == -1) {
-		LOGD("Error from stat of file %s: %d %s", path, errno, strerror(errno));
+		LOGD("<< js_fs_statSync: Error from stat of file %s: %d %s", path, errno, strerror(errno));
 		return DUK_RET_ERROR;
 	}
 	duk_push_object(ctx);
 	duk_push_int(ctx, statBuf.st_size);
 	duk_put_prop_string(ctx, -2, "size");
+	LOGD("<< js_fs_statSync: %s - size: %ld", path, statBuf.st_size);
 	return 1;
 } // js_fs_fstatSync
+
 
 /**
  * Perform a stat on the file.  The return data includes:
@@ -336,6 +343,7 @@ static duk_ret_t js_fs_readSync(duk_context *ctx) {
 	return 1;
 } // js_fs_readSync
 
+
 /**
  * Unlink the named file.
  * [0] - Path.  The path to the file to unlink.
@@ -403,98 +411,17 @@ static duk_ret_t js_fs_spiffsDir(duk_context *ctx) {
 /**
  * Create the FS module in Global.
  */
-void ModuleFS(duk_context *ctx) {
-	duk_push_global_object(ctx);
-	// [0] - Global
+duk_ret_t ModuleFS(duk_context *ctx) {
 
-	duk_push_object(ctx); // Create new FS object
-	// [0] - Global
-	// [1] - FS Object
+	ADD_FUNCTION("closeSync", js_fs_closeSync, 1);
+	ADD_FUNCTION("dump",      js_fs_dump,      0);
+	ADD_FUNCTION("fstatSync", js_fs_fstatSync, 1);
+	ADD_FUNCTION("openSync",  js_fs_openSync,  3);
+	ADD_FUNCTION("readSync",  js_fs_readSync,  5);
+	ADD_FUNCTION("spiffsDir", js_fs_spiffsDir, 0);
+	ADD_FUNCTION("statSync",  js_fs_statSync,  1);
+	ADD_FUNCTION("unlink",    js_fs_unlink,    1);
+	ADD_FUNCTION("writeSync", js_fs_writeSync, 4);
 
-	duk_push_c_function(ctx, js_fs_openSync, 3);
-	// [0] - Global
-	// [1] - FS Object
-	// [2] - C Func - js_fs_openSync
-
-	duk_put_prop_string(ctx, -2, "openSync"); // Add openSync to new FS
-	// [0] - Global
-	// [1] - FS Object
-
-	duk_push_c_function(ctx, js_fs_closeSync, 1);
-	// [0] - Global
-	// [1] - FS Object
-	// [2] - C Func - js_fs_closeSync
-
-	duk_put_prop_string(ctx, -2, "closeSync"); // Add closeSync to new FS
-	// [0] - Global
-	// [1] - FS Object
-
-	duk_push_c_function(ctx, js_fs_readSync, 5);
-	// [0] - Global
-	// [1] - FS Object
-	// [2] - C Func - js_fs_readSync
-
-	duk_put_prop_string(ctx, -2, "readSync"); // Add readSync to new FS
-	// [0] - Global
-	// [1] - FS Object
-
-	duk_push_c_function(ctx, js_fs_writeSync, 4);
-	// [0] - Global
-	// [1] - FS Object
-	// [2] - C Func - js_fs_writeSync
-
-	duk_put_prop_string(ctx, -2, "writeSync"); // Add writeSync to new FS
-	// [0] - Global
-	// [1] - FS Object
-
-	duk_push_c_function(ctx, js_fs_statSync, 1);
-	// [0] - Global
-	// [1] - FS Object
-	// [2] - C Func - js_fs_statSync
-
-	duk_put_prop_string(ctx, -2, "statSync"); // Add statSync to new FS
-	// [0] - Global
-	// [1] - FS Object
-
-	duk_push_c_function(ctx, js_fs_fstatSync, 1);
-	// [0] - Global
-	// [1] - FS Object
-	// [2] - C Func - js_fs_fstatSync
-
-	duk_put_prop_string(ctx, -2, "fstatSync"); // Add fstatSync to new FS
-	// [0] - Global
-	// [1] - FS Object
-
-	duk_push_c_function(ctx, js_fs_unlink, 1);
-	// [0] - Global
-	// [1] - FS Object
-	// [2] - C Func - js_fs_unlink
-
-	duk_put_prop_string(ctx, -2, "unlink"); // Add unlink to new FS
-	// [0] - Global
-	// [1] - FS Object
-
-	duk_push_c_function(ctx, js_fs_dump, 0);
-	// [0] - Global
-	// [1] - FS Object
-	// [2] - C Func - js_fs_dump
-
-	duk_put_prop_string(ctx, -2, "dump"); // Add dump to new FS
-	// [0] - Global
-	// [1] - FS Object
-
-	duk_push_c_function(ctx, js_fs_spiffsDir, 0);
-	// [0] - Global
-	// [1] - FS Object
-	// [2] - C Func - js_fs_spiffsDir
-
-	duk_put_prop_string(ctx, -2, "spiffsDir"); // Add spiffsDir to new FS
-	// [0] - Global
-	// [1] - FS Object
-
-	duk_put_prop_string(ctx, -2, "FS"); // Add FS to global
-	// [0] - Global
-
-	duk_pop(ctx);
-	// <empty stack>
+	return 0;
 } // ModuleFS

@@ -34,6 +34,12 @@ static uint32_t g_apStartCallbackStashKey = -1;
 
 static int scanParamsDataProvider(duk_context *ctx, void *context);
 
+/*
+ * This function is called when the ESP32_DUKTAPE_CALLBACK_TYPE_FUNCTION is
+ * being processed and adds the context as a parameter to the called back
+ * function.  It adds an error code which is either "null" to indicate that
+ * there was no error or it adds a string indicating the error.
+ */
 static int addError(duk_context *ctx, void *context) {
 	if (context == NULL) {
 		duk_push_null(ctx);
@@ -41,7 +47,7 @@ static int addError(duk_context *ctx, void *context) {
 		duk_push_string(ctx, (char *)context);
 	}
 	return 1;
-}
+} // addError
 
 
 /**
@@ -164,14 +170,14 @@ static esp_err_t esp32_wifi_eventHandler(void *param_ctx, system_event_t *event)
 
 /**
  * Connect WiFi to an access point.
- * options:
+ * [0] - options:
  * - ssid
  * - password [optional]
  * - network [optional]
  *  - ip
  *  - gw
  *  - netmask
- * callback: a callback function
+ * [1] - callback: a callback function
  */
 static duk_ret_t js_wifi_connect(duk_context *ctx) {
 	esp_err_t errRc;
@@ -238,6 +244,12 @@ static duk_ret_t js_wifi_connect(duk_context *ctx) {
 		const char *netmaskString = duk_get_string(ctx, -1);
 		duk_pop(ctx);
 
+		/*
+		ipString = "192.168.1.99";
+		gwString = "192.168.1.1";
+		netmaskString = "255.255.255.0";
+		*/
+
 		// We now try and get network IP information but check that it is good first
 	  if (inet_pton(AF_INET, ipString, &ipInfo.ip) == 1 &&
 	  inet_pton(AF_INET, gwString, &ipInfo.gw) == 1 &&
@@ -254,16 +266,19 @@ static duk_ret_t js_wifi_connect(duk_context *ctx) {
 		// Since we were NOT supplied network information or couldn't use it, use DHCP.
 		errRc = tcpip_adapter_dhcpc_start(TCPIP_ADAPTER_IF_STA);
 		if (errRc != ESP_OK) {
+			LOGE("tcpip_adapter_dhcpc_start() rc=%d", errRc);
 			duk_error(ctx, 1, "tcpip_adapter_dhcpc_start rc=%s", esp32_errToString(errRc));
 		}
 	} // useDHCP is true
 
 	// Perform the actual connection to the access point.
+	LOGD("Calling esp_wifi_set_mode()");
 	errRc = esp_wifi_set_mode(WIFI_MODE_STA);
 	if (errRc != ESP_OK) {
-		LOGD("esp_wifi_set_mode() rc=%d", errRc);
+		LOGE("esp_wifi_set_mode() rc=%d", errRc);
 		duk_error(ctx, 1, "esp_wifi_set_mode rc=%s", esp32_errToString(errRc));
 	}
+	vTaskDelay(2000/portTICK_PERIOD_MS);
 
 	LOGD(" - Connecting to access point: \"%s\" with \"%s\"", ssid, "<Password hidden>");
   wifi_config_t sta_config;
@@ -271,21 +286,29 @@ static duk_ret_t js_wifi_connect(duk_context *ctx) {
   strcpy((char *)sta_config.sta.password, password);
   sta_config.sta.bssid_set = 0;
 
+	LOGD("Calling esp_wifi_set_config()");
   errRc = esp_wifi_set_config(WIFI_IF_STA, &sta_config);
 	if (errRc != ESP_OK) {
-		LOGD("esp_wifi_set_config() rc=%d", errRc);
+		LOGE("esp_wifi_set_config() rc=%d", errRc);
 		duk_error(ctx, 1, "esp_wifi_set_config rc=%s", esp32_errToString(errRc));
 	}
+	vTaskDelay(2000/portTICK_PERIOD_MS);
 
+	LOGD("Calling esp_wifi_start()");
 	errRc = esp_wifi_start();
 	if (errRc != ESP_OK) {
-		LOGD("esp_wifi_start() rc=%d", errRc);
+		LOGE("esp_wifi_start() rc=%d", errRc);
 		duk_error(ctx, 1, "esp_wifi_start rc=%s", esp32_errToString(errRc));
 	}
 
+	vTaskDelay(2000/portTICK_PERIOD_MS);
+
+
+	LOGD("Performing a connect");
+	LOGD("Calling esp_wifi_connect()");
 	errRc = esp_wifi_connect();
 	if (errRc != ESP_OK) {
-		LOGD("esp_wifi_connect() rc=%d", errRc);
+		LOGE("esp_wifi_connect() rc=%d", errRc);
 		duk_error(ctx, 1, "esp_wifi_connect rc=%s", esp32_errToString(errRc));
 	}
 
@@ -773,92 +796,19 @@ void ModuleWIFI(duk_context *ctx) {
 	duk_push_global_object(ctx);
 	// [0] - Global object
 
-	duk_idx_t idx = duk_push_object(ctx); // Create new WIFI object
+	duk_push_object(ctx); // Create new WIFI object
 	// [0] - Global object
 	// [1] - New object
 
-	duk_push_c_function(ctx, js_wifi_connect, 2);
-	// [0] - Global object
-	// [1] - New object
-	// [2] - c-func - js_wifi_connect
-
-	duk_put_prop_string(ctx, idx, "connect"); // Add connect to new WIFI
-	// [0] - Global object
-	// [1] - New object
-
-	duk_push_c_function(ctx, js_wifi_disconnect, 0);
-	// [0] - Global object
-	// [1] - New object
-	// [2] - c-func - js_wifi_disconnect
-
-	duk_put_prop_string(ctx, idx, "disconnect"); // Add connect to new WIFI
-	// [0] - Global object
-	// [1] - New object
-
-	duk_push_c_function(ctx, js_wifi_getDNS, 0);
-	// [0] - Global object
-	// [1] - New object
-	// [2] - c-func - js_wifi_getDNS
-
-	duk_put_prop_string(ctx, idx, "getDNS"); // Add getDNS to new WIFI
-	// [0] - Global object
-	// [1] - New object
-
-	duk_push_c_function(ctx, js_wifi_getState, 0);
-	// [0] - Global object
-	// [1] - New object
-	// [2] - c-func - js_wifi_getState
-
-	duk_put_prop_string(ctx, idx, "getState"); // Add getState to new WIFI
-	// [0] - Global object
-	// [1] - New object
-
-	duk_push_c_function(ctx, js_wifi_listen, 2);
-	// [0] - Global object
-	// [1] - New object
-	// [2] - c-func - js_wifi_listen
-
-	duk_put_prop_string(ctx, idx, "listen"); // Add listen to new WIFI
-	// [0] - Global object
-	// [1] - New object
-
-	duk_push_c_function(ctx, js_wifi_scan, 1);
-	// [0] - Global object
-	// [1] - New object
-	// [2] - c-func - js_wifi_scan
-
-	duk_put_prop_string(ctx, idx, "scan"); // Add scan to new WIFI
-	// [0] - Global object
-	// [1] - New object
-
-	duk_push_c_function(ctx, js_wifi_setDNS, 1);
-	// [0] - Global object
-	// [1] - New object
-	// [2] - c-func - js_wifi_setDNS
-
-	duk_put_prop_string(ctx, idx, "setDNS"); // Add setDNS to new WIFI
-	// [0] - Global object
-	// [1] - New object
-
-	duk_push_c_function(ctx, js_wifi_start, 0);
-	// [0] - Global object
-	// [1] - New object
-	// [2] - c-func - js_wifi_start
-
-	duk_put_prop_string(ctx, idx, "start"); // Add start to new WIFI
-	// [0] - Global object
-	// [1] - New object
-
-
-	duk_push_c_function(ctx, js_wifi_stop, 0);
-	// [0] - Global object
-	// [1] - New object
-	// [2] - c-func - js_wifi_stop
-
-	duk_put_prop_string(ctx, idx, "stop"); // Add stop to new WIFI
-	// [0] - Global object
-	// [1] - New object
-
+	ADD_FUNCTION("connect",    js_wifi_connect,    2);
+	ADD_FUNCTION("disconnect", js_wifi_disconnect, 0);
+	ADD_FUNCTION("getDNS",     js_wifi_getDNS,     0);
+	ADD_FUNCTION("getState",   js_wifi_getState,   0);
+	ADD_FUNCTION("listen",     js_wifi_listen,     2);
+	ADD_FUNCTION("scan",       js_wifi_scan,       1);
+	ADD_FUNCTION("setDNS",     js_wifi_setDNS,     1);
+	ADD_FUNCTION("start",      js_wifi_start,      0);
+	ADD_FUNCTION("stop",       js_wifi_stop,       0);
 
 	duk_put_prop_string(ctx, 0, "WIFI"); // Add WIFI to global
 	// [0] - Global object
