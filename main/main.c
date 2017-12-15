@@ -372,8 +372,8 @@ void app_main(void) {
     ESP_LOGI(LOG_STARTUP, "Configured Fade Tasks and Queues.\n");
 
     
-    SET_PERI_REG_MASK(DPORT_PERIP_CLK_EN_REG, DPORT_LEDC_CLK_EN);
-    CLEAR_PERI_REG_MASK(DPORT_PERIP_RST_EN_REG, DPORT_LEDC_RST);
+    DPORT_SET_PERI_REG_MASK(DPORT_PERIP_CLK_EN_REG, DPORT_LEDC_CLK_EN);
+    DPORT_CLEAR_PERI_REG_MASK(DPORT_PERIP_RST_EN_REG, DPORT_LEDC_RST);
     ESP_LOGI(LOG_STARTUP, "\nConfigured LED Controller.\n");
     
     ledc_timer_config_t timer_config = {
