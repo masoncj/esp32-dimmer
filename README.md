@@ -19,10 +19,14 @@ Next step is to implement HTML/wifi based control.  Looking at possibly using
 
 ### Building
 
-Requires [ESP32 IDF](https://github.com/espressif/esp-idf/).
+Requires [ESP32 IDF](https://github.com/espressif/esp-idf/).  
+
+Currently using v4.4.3 (`git checkout v4.4 --recurse-submodules`)
 
 ```
-export IDF_PATH=/path/to/esp-idf
-make menuconfig
-make flash
+. /path/to/esp/idf/export.sh
+idf.py set-target esp32
+idf.py menuconfig
+idf.py build
+idf.py -p /dev/tty.usbserial* flash
 ```

@@ -6,7 +6,6 @@
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "esp_event.h"
-#include "esp_event_loop.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
@@ -14,6 +13,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <soc/ledc_struct.h>
+#include <soc/ledc_reg.h>
 #include <sys/time.h>
 
 // Timing configuration ///////////////////////////////////////////////////////////
@@ -371,9 +371,8 @@ void app_main(void) {
 
     ESP_LOGI(LOG_STARTUP, "Configured Fade Tasks and Queues.\n");
 
+    periph_module_enable(PERIPH_LEDC_MODULE);
     
-    DPORT_SET_PERI_REG_MASK(DPORT_PERIP_CLK_EN_REG, DPORT_LEDC_CLK_EN);
-    DPORT_CLEAR_PERI_REG_MASK(DPORT_PERIP_RST_EN_REG, DPORT_LEDC_RST);
     ESP_LOGI(LOG_STARTUP, "\nConfigured LED Controller.\n");
     
     ledc_timer_config_t timer_config = {
