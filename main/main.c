@@ -10,6 +10,8 @@
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "lightbulb.h"
+#include "wifi.h"
 #include <math.h>
 #include <stdio.h>
 #include <soc/ledc_struct.h>
@@ -21,7 +23,7 @@
 #define TICK_RATE_HZ 100
 #define TICK_PERIOD_MS (1000 / TICK_RATE_HZ)
 #define HZ 60
-#define TESTING_FADE_DURATION_MSECS 5000
+#define TESTING_FADE_DURATION_MSECS 500
 #define REPORT_DURATION_MSECS 10000
 #define DUTY_BIT_DEPTH 10
 
@@ -75,6 +77,9 @@ static const char* LOG_STARTUP = "startup";
 static const char* LOG_FADE = "fade";
 static const char* LOG_CYCLES = "cycles";
 
+#define LIGHTBULB_TASK_PRIORITY  1
+#define LIGHTBULB_TASK_STACKSIZE 4 * 1024
+#define LIGHTBULB_TASK_NAME      "hap_lightbulb"
 
 esp_err_t event_handler(void *ctx, system_event_t *event) {
     return ESP_OK;
@@ -135,8 +140,9 @@ BaseType_t set_channel_fade(uint32_t channel, uint32_t duration_msecs, uint16_t 
         }
     }
     if (!found) {
-        // Not currently fading, use current value, but remember to invert it (low hpoint is high brightness).
-        start_brightness = ((1 << DUTY_BIT_DEPTH) - 1) - LEDC.channel_group[0].channel[channel].hpoint.hpoint;
+        // Not currently fading, use current value, but need? to invert it (low hpoint is high brightness).
+        start_brightness = LEDC.channel_group[0].channel[channel].hpoint.hpoint;
+        // ((1 << DUTY_BIT_DEPTH) - 1) -
     }
 
     fade_t fade;
@@ -144,7 +150,7 @@ BaseType_t set_channel_fade(uint32_t channel, uint32_t duration_msecs, uint16_t 
     fade.start_brightness = start_brightness;
     fade.end_brightness = end_brightness;
     fade.start_cycle_num = cycle_counter;
-    fade.end_cycle_num = (uint32_t)(fade.start_cycle_num + (duration_msecs / 1000 * HZ * 2));
+    fade.end_cycle_num = (uint32_t)(fade.start_cycle_num + ((float_t)duration_msecs / 1000 * HZ * 2));
 
     // Enqueue a task to put the fade on the ring buffer.
     BaseType_t ret = xQueueSend(
@@ -179,13 +185,7 @@ void fade_end_task(void* arg){
     while(1) {
         fade_t fade;
         if(xQueueReceive(fade_end_queue, &fade, portMAX_DELAY)) {
-            uint16_t brightness = fade.end_brightness > fade.start_brightness ? 0 : (1 << DUTY_BIT_DEPTH) - 1;
-            for (uint16_t channel = 0; channel < NUM_CHANNELS; ++channel) {
-                if (fade.channels & (1 << channel)) {
-                    set_channel_fade(channel, TESTING_FADE_DURATION_MSECS, brightness);
-                    ESP_LOGD(LOG_FADE, "Reset fade for channel %i to %i.\n", channel, brightness);
-                }
-            }
+            ESP_LOGI(LOG_FADE, "Fade complete.\n");
         }
     }
 }
@@ -269,8 +269,6 @@ void IRAM_ATTR zero_crossing_interrupt(void* arg) {
         for (int i = 0; i < 100; ++i) {}
         if (GPIO.in & (1 << ZERO_CROSSING_PIN)) {
 
-            GPIO.out_w1ts = 1 << LED_PIN;
-
             // Zero the PWM timer at the zero crossing.
             LEDC.timer_group[0].timer[0].conf.rst = 1;
             LEDC.timer_group[0].timer[0].conf.rst = 0;
@@ -279,38 +277,83 @@ void IRAM_ATTR zero_crossing_interrupt(void* arg) {
             set_up_fades(current_cycle);
             cycle_counter += 1;
 
-            GPIO.out_w1tc = 1 << LED_PIN;
         }
     }
     GPIO.status_w1tc = intr_st;
 }
 
+/* HomeKit Lightbulb Example Dummy Implementation
+ * Refer ESP IDF docs for LED driver implementation:
+ * https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/ledc.html
+ * https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/rmt.html
+*/
+
+static const char *TAG = "lightbulb";
+
+/**
+ * @brief initialize the lightbulb lowlevel module
+ *
+ * @param none
+ *
+ * @return none
+ */
+void lightbulb_init(void) {}
+
+/**
+ * @brief deinitialize the lightbulb's lowlevel module
+ *
+ * @param none
+ *
+ * @return none
+ */
+void lightbulb_deinit(void) {}
+
+
+/**
+ * @brief turn on/off the lowlevel lightbulb
+ */
+int lightbulb_set_on(int channel, bool value)
+{
+    ESP_LOGI(TAG, "lightbulb_set_on channel %i value %s", channel, value == true ? "true" : "false");
+
+    if (!value) {
+        set_channel_fade(channel, TESTING_FADE_DURATION_MSECS, (1 << DUTY_BIT_DEPTH) - 1 );
+    }
+
+    return 0;
+}
+
+int lightbulb_set_brightness(int channel, int value)
+{
+    ESP_LOGI(TAG, "lightbulb_set_brightness channel %i value %d", channel, value);
+
+    // TODO: should we use DUTY_BIT_DEPTH when configuring characteristic?
+    uint16_t brightness = ((1 << DUTY_BIT_DEPTH) -1) * ((float)(100-value)/100.);
+
+    set_channel_fade(channel, TESTING_FADE_DURATION_MSECS, brightness);
+
+    return 0;
+}
 
 void app_main(void) {
-     nvs_flash_init();
+
+    ESP_LOGI(LOG_STARTUP, "\n\nIn main.\n");
+    //Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_LOGI(LOG_STARTUP, "\n\nFlash initialized.\n");
 
     esp_log_level_set(LOG_FADE, ESP_LOG_WARN);
     esp_log_level_set(LOG_CYCLES, ESP_LOG_WARN);
 
-     ESP_LOGI(LOG_STARTUP, "\n\nIn main.\n");
-     
-//     tcpip_adapter_init();
-//     ESP_ERROR_CHECK( esp_event_loop_init(event_handler, NULL) );
-//     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-//     ESP_ERROR_CHECK( esp_wifi_init(&cfg) );
-//     ESP_ERROR_CHECK( esp_wifi_set_storage(WIFI_STORAGE_RAM) );
-//     ESP_ERROR_CHECK( esp_wifi_set_mode(WIFI_MODE_STA) );
-//     wifi_config_t sta_config = {
-//         .sta = {
-//             .ssid = "mason",
-//             .password = "PASSWORD",
-//             .bssid_set = false
-//         }
-//     };
-//     ESP_ERROR_CHECK( esp_wifi_set_config(WIFI_IF_STA, &sta_config) );
 //     ESP_ERROR_CHECK( esp_wifi_start() );
 //     ESP_ERROR_CHECK( esp_wifi_connect() );
-//     
+//
 //     ESP_LOGI(LOG_STARTUP, "Configured wifi.\n");
     
     // Set LED to monitor setup:
@@ -407,12 +450,24 @@ void app_main(void) {
     ESP_ERROR_CHECK( gpio_intr_enable(ZERO_CROSSING_PIN) );
     ESP_LOGI(LOG_STARTUP, "Enabled zero crossing interrupt.\n");
 
-    for (uint16_t i = 0; i < NUM_CHANNELS; ++i) {
-        set_channel_fade(i, TESTING_FADE_DURATION_MSECS, (1 << DUTY_BIT_DEPTH) - 1);
-        vTaskDelay( TESTING_FADE_DURATION_MSECS / NUM_CHANNELS / TICK_PERIOD_MS);
-    }
+    wifi_init_sta();
 
-    ESP_LOGI(LOG_STARTUP, "Set channel fades.\n");
+    ESP_LOGI(LOG_STARTUP, "Started Wifi.\n");
+
+    lightbulb_thread_data lightbulb;
+    lightbulb.num_channels = 4;
+    lightbulb.finished_event_group = xEventGroupCreate();
+
+    xTaskCreate(lightbulb_thread_entry, LIGHTBULB_TASK_NAME, LIGHTBULB_TASK_STACKSIZE,
+                (void*)&lightbulb, LIGHTBULB_TASK_PRIORITY, NULL);
+
+    xEventGroupWaitBits(lightbulb.finished_event_group,
+                       BIT0,
+                       pdFALSE,
+                       pdFALSE,
+                       portMAX_DELAY);
+
+    ESP_LOGI(LOG_STARTUP, "Done initializing!\n");
 
     gpio_set_level(LED_PIN, 0);
 
